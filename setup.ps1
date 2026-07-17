@@ -31,9 +31,31 @@ $keyfile = Join-Path $keydir "$slug.key"
 icacls $keyfile /inheritance:r | Out-Null
 icacls $keyfile /grant:r "$($env:USERNAME):F" | Out-Null
 
+# Run a native command, capture stdout+stderr as one string, and hand back the exit
+# code. Native tools use stderr for ordinary output: ssh prints GitHub's "successfully
+# authenticated" banner there (and exits 1, because deploy keys never get a shell), and
+# ssh reports blocked ports there too. Windows PowerShell 5.1 turns merged (2>&1) native
+# stderr into a *terminating* NativeCommandError while $ErrorActionPreference is "Stop",
+# so a perfectly good probe aborts the script before we can read it. PowerShell 7 does
+# not do this. Relax the preference just for the call, then put it back; the callers
+# below already decide what the result means.
+function Invoke-Native {
+  param([Parameter(Mandatory=$true)][string]$File, [string[]]$Arguments = @())
+  $prev = $ErrorActionPreference
+  $ErrorActionPreference = "Continue"
+  try {
+    $lines = & $File @Arguments 2>&1 | ForEach-Object { [string]$_ }
+    return [pscustomobject]@{ Output = ($lines -join "`n"); ExitCode = $LASTEXITCODE }
+  } finally {
+    $ErrorActionPreference = $prev
+  }
+}
+
 function Ssh-Auth($h,$p){
-  (ssh -i $keyfile -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new `
-       -o ConnectTimeout=6 -o BatchMode=yes -p $p -T "git@$h" 2>&1) -join "`n"
+  (Invoke-Native "ssh" @("-i",$keyfile,"-o","IdentitiesOnly=yes",
+                         "-o","StrictHostKeyChecking=accept-new",
+                         "-o","ConnectTimeout=6","-o","BatchMode=yes",
+                         "-p","$p","-T","git@$h")).Output
 }
 $url = "git@github.com:$REPO.git"
 if($env:INTERVIEW_FORCE_443 -eq "1"){
@@ -51,8 +73,15 @@ if($env:INTERVIEW_FORCE_443 -eq "1"){
 $dest = $slug
 if(Test-Path $dest){ Fail "A directory named '$dest' already exists here. Move it, or cd elsewhere." }
 $env:GIT_SSH_COMMAND = "ssh -i `"$keyfile`" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+# Same hazard as the ssh probe: git reports clone progress on stderr. Leave the output
+# on the console (candidates should see progress) but relax the preference so a progress
+# line cannot be promoted to a terminating error, and judge the clone by its exit code.
+$prev = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
 git clone $url $dest
-if($LASTEXITCODE -ne 0){ Fail "git clone failed." }
+$cloneCode = $LASTEXITCODE
+$ErrorActionPreference = $prev
+if($cloneCode -ne 0){ Fail "git clone failed." }
 git -C $dest config core.sshCommand "ssh -i `"$keyfile`" -o IdentitiesOnly=yes"
 
 Write-Host ""

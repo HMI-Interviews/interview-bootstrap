@@ -1,0 +1,113 @@
+name: script-tests
+
+# Fast, hermetic tests for the bootstrap scripts: no secrets, no network, no
+# provisioned repo. Stub ssh/git reproduce the real tools' stdout/stderr/exit-code
+# contract, so script behaviour can be asserted deterministically.
+#
+# The two Windows jobs are the point of this file. They are deliberately separate
+# jobs rather than a matrix, because the shell keyword itself is what is under test
+# (and GitHub rejects the workflow outright if 'shell' is given an expression):
+#   * windows-powershell-51 -> 'shell: powershell', Windows PowerShell 5.1, the
+#     default blue console most candidates have.
+#   * windows-pwsh-7        -> 'shell: pwsh', PowerShell 7.x.
+# bootstrap-test.yml only ever ran pwsh, so 5.1-specific faults were invisible to CI.
+#
+# Actions logs are not readable from every environment, so a failing job posts its
+# captured test output as a commit comment (the self-diagnosing pattern the problem
+# catalog's polyglot-test already uses).
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows-powershell-51:
+    name: setup.ps1 (Windows PowerShell 5.1)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Report host version
+        shell: powershell
+        run: $PSVersionTable | Format-List
+      - name: Run setup.ps1 behavioural tests
+        id: tests
+        continue-on-error: true
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Continue"
+          & .\tests\Invoke-SetupTests.ps1 *>&1 | Tee-Object -FilePath ps51-output.txt
+          exit $LASTEXITCODE
+      - name: Post diagnostics on failure
+        if: always() && steps.tests.outcome == 'failure'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          {
+            echo '### script-tests failed - Windows PowerShell 5.1'
+            echo
+            echo '```'
+            cat ps51-output.txt 2>/dev/null || echo '(no test output captured)'
+            echo '```'
+          } > body.txt
+          gh api -X POST "repos/${{ github.repository }}/commits/${{ github.sha }}/comments" -f body="$(cat body.txt)"
+          echo "posted diagnostics as a commit comment"
+      - name: Fail if tests failed
+        if: always() && steps.tests.outcome == 'failure'
+        shell: bash
+        run: exit 1
+
+  windows-pwsh-7:
+    name: setup.ps1 (PowerShell 7)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Report host version
+        shell: pwsh
+        run: $PSVersionTable | Format-List
+      - name: Run setup.ps1 behavioural tests
+        id: tests
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Continue"
+          & .\tests\Invoke-SetupTests.ps1 *>&1 | Tee-Object -FilePath pwsh7-output.txt
+          exit $LASTEXITCODE
+      - name: Post diagnostics on failure
+        if: always() && steps.tests.outcome == 'failure'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          {
+            echo '### script-tests failed - PowerShell 7'
+            echo
+            echo '```'
+            cat pwsh7-output.txt 2>/dev/null || echo '(no test output captured)'
+            echo '```'
+          } > body.txt
+          gh api -X POST "repos/${{ github.repository }}/commits/${{ github.sha }}/comments" -f body="$(cat body.txt)"
+          echo "posted diagnostics as a commit comment"
+      - name: Fail if tests failed
+        if: always() && steps.tests.outcome == 'failure'
+        shell: bash
+        run: exit 1
+
+  posix:
+    name: setup.sh (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Syntax check
+        run: bash -n setup.sh
+      - name: Run setup.sh behavioural tests
+        run: bash tests/test_setup_sh.sh
