@@ -114,6 +114,7 @@ rem eagerly, so an unescaped ")" in echoed text (e.g. "(12/12)") ends the block 
 rem yields "was unexpected at this time".
 if "%~1"=="clone" goto clone
 if "%~1"=="--version" goto version
+if "%~1"=="-C" goto dashc
 goto ok
 
 :clone
@@ -122,6 +123,18 @@ mkdir "%~3\.git" 2>nul
 echo ref: refs/heads/main> "%~3\.git\HEAD"
 echo remote: Enumerating objects: 12, done. 1>&2
 echo Receiving objects: 100%% ^(12/12^), done. 1>&2
+exit /b 0
+
+:dashc
+rem  git -C <dir> config core.sshCommand <value>
+rem  Record the persisted value verbatim so a test can read it back, exactly as real
+rem  git would store it in <dir>\.git\config. %~5 is the value, unquoted by cmd.
+if /I "%~3"=="config" (
+  if /I "%~4"=="core.sshCommand" (
+    if not exist "%~2\.git" mkdir "%~2\.git" 2>nul
+    >"%~2\.git\sshcommand.txt" echo %~5
+  )
+)
 exit /b 0
 
 :version
@@ -283,6 +296,35 @@ try {
     $r = Invoke-Setup -Workdir $w -Env @{ REPO = $Repo; KEY = $FakeKey }
     Assert-Contains $r.Output "already exists" "warns that the directory already exists"
     Assert-True ($r.ExitCode -ne 0) "script exits non-zero (got $($r.ExitCode))"
+} finally { Remove-Item -Recurse -Force $w -ErrorAction SilentlyContinue }
+
+# T7 -- the persisted core.sshCommand must survive git's own tokeniser.
+# Clone uses GIT_SSH_COMMAND from the live session and works; pull/push use the
+# core.sshCommand written into .git/config, which git re-parses with a POSIX-style
+# tokeniser that eats backslashes. A Windows key path must therefore be persisted with
+# forward slashes, or every push fails with "Permission denied (publickey)" pointing at
+# a mangled identity-file path.
+Write-Head "T7: persisted core.sshCommand keeps a usable key path (push/pull work)"
+$w = New-Workdir
+try {
+    $r = Invoke-Setup -Workdir $w -Env @{ REPO = $Repo; KEY = $FakeKey }
+    $cfg = Join-Path $r.RunDir "$Slug\.git\sshcommand.txt"
+    Assert-True (Test-Path $cfg) "core.sshCommand was persisted to .git/config"
+    $persisted = ""
+    if (Test-Path $cfg) { $persisted = (Get-Content -Raw $cfg).Trim() }
+    Write-Host "     | persisted: $persisted" -ForegroundColor DarkGray
+
+    # Emulate git's dequoting: a backslash escapes the next char. If the persisted value
+    # still contains Windows backslashes, the key path collapses and ssh can't find it.
+    $deReconstructed = $persisted -replace '\\(.)', '$1'
+    Assert-NotContains $deReconstructed ".interviewcand" `
+        "key path does not collapse under git's backslash tokeniser"
+    Assert-NotContains $persisted "\.interview\" `
+        "persisted path has no backslash-delimited .interview segment"
+    Assert-Contains $persisted "/.interview/" `
+        "persisted path contains a forward-slashed .interview segment"
+    Assert-Contains $persisted "$Slug.key" `
+        "persisted path still names the key file"
 } finally { Remove-Item -Recurse -Force $w -ErrorAction SilentlyContinue }
 
 # ----------------------------------------------------------------- summary ----

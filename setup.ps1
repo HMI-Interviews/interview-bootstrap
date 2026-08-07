@@ -27,6 +27,15 @@ New-Item -ItemType Directory -Force -Path $keydir | Out-Null
 $keyfile = Join-Path $keydir "$slug.key"
 [IO.File]::WriteAllBytes($keyfile, [Convert]::FromBase64String($KEY))
 
+# Forward-slash form for embedding in ssh command strings. Git tokenises the values of
+# core.sshCommand and GIT_SSH_COMMAND with a POSIX-style parser that treats "\" as an
+# escape, so a Windows path like C:\Users\me\.interview\x.key collapses to
+# C:Usersme.interviewx.key when git later launches ssh -- auth then fails on pull/push
+# even though the clone (which uses the env var in this live session) worked. Windows
+# ssh and git both accept forward slashes, so use them in every embedded command.
+$keyfileFwd = $keyfile -replace '\\','/'
+
+
 # lock the key down to the current user (OpenSSH refuses world-readable keys)
 icacls $keyfile /inheritance:r | Out-Null
 icacls $keyfile /grant:r "$($env:USERNAME):F" | Out-Null
@@ -72,7 +81,7 @@ if($env:INTERVIEW_FORCE_443 -eq "1"){
 
 $dest = $slug
 if(Test-Path $dest){ Fail "A directory named '$dest' already exists here. Move it, or cd elsewhere." }
-$env:GIT_SSH_COMMAND = "ssh -i `"$keyfile`" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+$env:GIT_SSH_COMMAND = "ssh -i `"$keyfileFwd`" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
 # Same hazard as the ssh probe: git reports clone progress on stderr. Leave the output
 # on the console (candidates should see progress) but relax the preference so a progress
 # line cannot be promoted to a terminating error, and judge the clone by its exit code.
@@ -82,7 +91,7 @@ git clone $url $dest
 $cloneCode = $LASTEXITCODE
 $ErrorActionPreference = $prev
 if($cloneCode -ne 0){ Fail "git clone failed." }
-git -C $dest config core.sshCommand "ssh -i `"$keyfile`" -o IdentitiesOnly=yes"
+git -C $dest config core.sshCommand "ssh -i `"$keyfileFwd`" -o IdentitiesOnly=yes"
 
 Write-Host ""
 Write-Host "Done - your interview repo is in:  .\$dest"
